@@ -22,8 +22,8 @@ On success / Code 200:
 }
 ```
 
-For access to API you need use a authorization header with a `Bearer` token.
-They are available for Add-ons and the Home Assistant using the `SUPERVISOR_TOKEN` environment variable.
+For access to the API you need use an authorization header with a `Bearer` token.
+The token can be made available for add-ons and Home Assistant using the `SUPERVISOR_TOKEN` environment variable.
 
 ### Supervisor
 
