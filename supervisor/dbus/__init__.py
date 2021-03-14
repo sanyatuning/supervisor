@@ -1,9 +1,12 @@
 """D-Bus interface objects."""
 import logging
+from typing import List
 
+from ..const import SOCKET_DBUS
 from ..coresys import CoreSys, CoreSysAttributes
-from ..exceptions import DBusNotConnectedError
 from .hostname import Hostname
+from .interface import DBusInterface
+from .logind import Logind
 from .network import NetworkManager
 from .rauc import Rauc
 from .systemd import Systemd
@@ -19,6 +22,7 @@ class DBusManager(CoreSysAttributes):
         self.coresys: CoreSys = coresys
 
         self._systemd: Systemd = Systemd()
+        self._logind: Logind = Logind()
         self._hostname: Hostname = Hostname()
         self._rauc: Rauc = Rauc()
         self._network: NetworkManager = NetworkManager()
@@ -27,6 +31,11 @@ class DBusManager(CoreSysAttributes):
     def systemd(self) -> Systemd:
         """Return the systemd interface."""
         return self._systemd
+
+    @property
+    def logind(self) -> Logind:
+        """Return the logind interface."""
+        return self._logind
 
     @property
     def hostname(self) -> Hostname:
@@ -45,13 +54,23 @@ class DBusManager(CoreSysAttributes):
 
     async def load(self) -> None:
         """Connect interfaces to D-Bus."""
-
-        try:
-            await self.systemd.connect()
-            await self.hostname.connect()
-            await self.rauc.connect()
-            await self.network.connect()
-        except DBusNotConnectedError:
+        if not SOCKET_DBUS.exists():
             _LOGGER.error(
                 "No D-Bus support on Host. Disabled any kind of host control!"
             )
+            return
+
+        dbus_loads: List[DBusInterface] = [
+            self.systemd,
+            self.logind,
+            self.hostname,
+            self.network,
+            self.rauc,
+        ]
+        for dbus in dbus_loads:
+            try:
+                await dbus.connect()
+            except Exception as err:  # pylint: disable=broad-except
+                _LOGGER.warning("Can't load dbus interface %s: %s", dbus.name, err)
+
+        self.sys_host.supported_features.cache_clear()

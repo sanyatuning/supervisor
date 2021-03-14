@@ -82,7 +82,10 @@ from ..const import (
     ATTR_STARTUP,
     ATTR_STATE,
     ATTR_STDIN,
+    ATTR_TRANSLATIONS,
+    ATTR_UART,
     ATTR_UDEV,
+    ATTR_UPDATE_AVAILABLE,
     ATTR_URL,
     ATTR_USB,
     ATTR_VALID,
@@ -100,7 +103,7 @@ from ..const import (
 )
 from ..coresys import CoreSysAttributes
 from ..docker.stats import DockerStats
-from ..exceptions import APIError
+from ..exceptions import APIError, APIForbidden
 from ..validate import docker_ports
 from .utils import api_process, api_process_raw, api_validate
 
@@ -161,10 +164,15 @@ class APIAddons(CoreSysAttributes):
                 ATTR_DESCRIPTON: addon.description,
                 ATTR_ADVANCED: addon.advanced,
                 ATTR_STAGE: addon.stage,
-                ATTR_VERSION: addon.latest_version,
-                ATTR_INSTALLED: addon.version if addon.is_installed else None,
+                ATTR_VERSION: addon.version if addon.is_installed else None,
+                ATTR_VERSION_LATEST: addon.latest_version,
+                ATTR_UPDATE_AVAILABLE: addon.need_update
+                if addon.is_installed
+                else False,
+                ATTR_INSTALLED: addon.is_installed,
                 ATTR_AVAILABLE: addon.available,
                 ATTR_DETACHED: addon.is_detached,
+                ATTR_HOMEASSISTANT: addon.homeassistant_version,
                 ATTR_REPOSITORY: addon.repository,
                 ATTR_BUILD: addon.need_build,
                 ATTR_URL: addon.url,
@@ -209,6 +217,7 @@ class APIAddons(CoreSysAttributes):
             ATTR_REPOSITORY: addon.repository,
             ATTR_VERSION: None,
             ATTR_VERSION_LATEST: addon.latest_version,
+            ATTR_UPDATE_AVAILABLE: False,
             ATTR_PROTECTED: addon.protected,
             ATTR_RATING: rating_security(addon),
             ATTR_BOOT: addon.boot,
@@ -231,7 +240,7 @@ class APIAddons(CoreSysAttributes):
             ATTR_PRIVILEGED: addon.privileged,
             ATTR_FULL_ACCESS: addon.with_full_access,
             ATTR_APPARMOR: addon.apparmor,
-            ATTR_DEVICES: _pretty_devices(addon),
+            ATTR_DEVICES: addon.static_devices,
             ATTR_ICON: addon.with_icon,
             ATTR_LOGO: addon.with_logo,
             ATTR_CHANGELOG: addon.with_changelog,
@@ -244,6 +253,7 @@ class APIAddons(CoreSysAttributes):
             ATTR_HOMEASSISTANT_API: addon.access_homeassistant_api,
             ATTR_GPIO: addon.with_gpio,
             ATTR_USB: addon.with_usb,
+            ATTR_UART: addon.with_uart,
             ATTR_KERNEL_MODULES: addon.with_kernel_modules,
             ATTR_DEVICETREE: addon.with_devicetree,
             ATTR_UDEV: addon.with_udev,
@@ -256,6 +266,7 @@ class APIAddons(CoreSysAttributes):
             ATTR_SERVICES: _pretty_services(addon),
             ATTR_DISCOVERY: addon.discovery,
             ATTR_IP_ADDRESS: None,
+            ATTR_TRANSLATIONS: addon.translations,
             ATTR_INGRESS: addon.with_ingress,
             ATTR_INGRESS_ENTRY: None,
             ATTR_INGRESS_URL: None,
@@ -278,7 +289,10 @@ class APIAddons(CoreSysAttributes):
                     ATTR_AUTO_UPDATE: addon.auto_update,
                     ATTR_IP_ADDRESS: str(addon.ip_address),
                     ATTR_VERSION: addon.version,
+                    ATTR_UPDATE_AVAILABLE: addon.need_update,
                     ATTR_WATCHDOG: addon.watchdog,
+                    ATTR_DEVICES: addon.static_devices
+                    + [device.path for device in addon.devices],
                 }
             )
 
@@ -333,6 +347,19 @@ class APIAddons(CoreSysAttributes):
         return data
 
     @api_process
+    async def options_config(self, request: web.Request) -> None:
+        """Validate user options for add-on."""
+        slug: str = request.match_info.get("addon")
+        if slug != "self":
+            raise APIForbidden("This can be only read by the Add-on itself!")
+
+        addon = self._extract_addon_installed(request)
+        try:
+            return addon.schema(addon.options)
+        except vol.Invalid:
+            raise APIError("Invalid configuration data for the add-on") from None
+
+    @api_process
     async def security(self, request: web.Request) -> None:
         """Store security options for add-on."""
         addon = self._extract_addon_installed(request)
@@ -363,12 +390,6 @@ class APIAddons(CoreSysAttributes):
         }
 
     @api_process
-    def install(self, request: web.Request) -> Awaitable[None]:
-        """Install add-on."""
-        addon = self._extract_addon(request)
-        return asyncio.shield(addon.install())
-
-    @api_process
     def uninstall(self, request: web.Request) -> Awaitable[None]:
         """Uninstall add-on."""
         addon = self._extract_addon_installed(request)
@@ -385,12 +406,6 @@ class APIAddons(CoreSysAttributes):
         """Stop add-on."""
         addon = self._extract_addon_installed(request)
         return asyncio.shield(addon.stop())
-
-    @api_process
-    def update(self, request: web.Request) -> Awaitable[None]:
-        """Update add-on."""
-        addon: Addon = self._extract_addon_installed(request)
-        return asyncio.shield(addon.update())
 
     @api_process
     def restart(self, request: web.Request) -> Awaitable[None]:
@@ -459,14 +474,6 @@ class APIAddons(CoreSysAttributes):
 
         data = await request.read()
         await asyncio.shield(addon.write_stdin(data))
-
-
-def _pretty_devices(addon: AnyAddon) -> List[str]:
-    """Return a simplified device list."""
-    dev_list = addon.devices
-    if not dev_list:
-        return []
-    return [row.split(":")[0] for row in dev_list]
 
 
 def _pretty_services(addon: AnyAddon) -> List[str]:

@@ -9,14 +9,14 @@ from .addons.addon import Addon
 from .const import ATTR_PORTS, ATTR_SESSION, FILE_HASSIO_INGRESS
 from .coresys import CoreSys, CoreSysAttributes
 from .utils import check_port
+from .utils.common import FileConfiguration
 from .utils.dt import utc_from_timestamp, utcnow
-from .utils.json import JsonConfig
 from .validate import SCHEMA_INGRESS_CONFIG
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
 
-class Ingress(JsonConfig, CoreSysAttributes):
+class Ingress(FileConfiguration, CoreSysAttributes):
     """Fetch last versions from version.json."""
 
     def __init__(self, coresys: CoreSys):
@@ -109,17 +109,19 @@ class Ingress(JsonConfig, CoreSysAttributes):
     def validate_session(self, session: str) -> bool:
         """Return True if session valid and make it longer valid."""
         if session not in self.sessions:
+            _LOGGER.debug("Session %f is not known", session)
             return False
 
         # check if timestamp valid, to avoid crash on malformed timestamp
         try:
             valid_until = utc_from_timestamp(self.sessions[session])
         except OverflowError:
-            _LOGGER.warning("Session timestamp %f is invalid!", self.sessions[session])
-            return False
+            self.sessions[session] = utcnow() + timedelta(minutes=15)
+            return True
 
         # Is still valid?
         if valid_until < utcnow():
+            _LOGGER.debug("Session is no longer valid (%f/%f)", valid_until, utcnow())
             return False
 
         # Update time

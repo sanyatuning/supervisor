@@ -3,8 +3,9 @@ import os
 import re
 
 from aiohttp import hdrs
+import attr
 
-from ..const import ENV_SUPERVISOR_DEV, HEADER_TOKEN_OLD, CoreState
+from ..const import HEADER_TOKEN_OLD, CoreState
 from ..coresys import CoreSys
 from ..exceptions import AddonConfigurationError
 
@@ -22,8 +23,6 @@ def sanitize_url(url: str) -> str:
 
 def filter_data(coresys: CoreSys, event: dict, hint: dict) -> dict:
     """Filter event data before sending to sentry."""
-    dev_env: bool = bool(os.environ.get(ENV_SUPERVISOR_DEV, 0))
-
     # Ignore some  exceptions
     if "exc_info" in hint:
         _, exc_value, _ = hint["exc_info"]
@@ -31,7 +30,7 @@ def filter_data(coresys: CoreSys, event: dict, hint: dict) -> dict:
             return None
 
     # Ignore issue if system is not supported or diagnostics is disabled
-    if not coresys.config.diagnostics or not coresys.core.supported or dev_env:
+    if not coresys.config.diagnostics or not coresys.core.supported or coresys.dev:
         return None
 
     event.setdefault("extra", {}).update({"os.environ": dict(os.environ)})
@@ -63,6 +62,7 @@ def filter_data(coresys: CoreSys, event: dict, hint: dict) -> dict:
                 "host": coresys.host.info.operating_system,
                 "kernel": coresys.host.info.kernel,
                 "machine": coresys.machine,
+                "images": list(coresys.resolution.evaluate.cached_images),
             },
             "versions": {
                 "audio": coresys.plugins.audio.version,
@@ -74,6 +74,14 @@ def filter_data(coresys: CoreSys, event: dict, hint: dict) -> dict:
                 "observer": coresys.plugins.observer.version,
                 "os": coresys.hassos.version,
                 "supervisor": coresys.supervisor.version,
+            },
+            "resolution": {
+                "issues": [attr.asdict(issue) for issue in coresys.resolution.issues],
+                "suggestions": [
+                    attr.asdict(suggestion)
+                    for suggestion in coresys.resolution.suggestions
+                ],
+                "unhealthy": coresys.resolution.unhealthy,
             },
         }
     )

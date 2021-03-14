@@ -37,12 +37,13 @@ class DockerMulticast(DockerInterface, CoreSysAttributes):
         # Create & Run container
         docker_container = self.sys_docker.run(
             self.image,
-            version=self.sys_plugins.multicast.version,
+            tag=str(self.sys_plugins.multicast.version),
             init=False,
             name=self.name,
             hostname=self.name.replace("_", "-"),
             network_mode="host",
             detach=True,
+            security_opt=self.security_opt,
             extra_hosts={"supervisor": self.sys_docker.network.supervisor},
             environment={ENV_TIME: self.sys_config.timezone},
         )

@@ -8,8 +8,12 @@ from tempfile import TemporaryDirectory
 from typing import Awaitable, Optional
 
 import aiohttp
+from aiohttp.client_exceptions import ClientError
+from awesomeversion import AwesomeVersion, AwesomeVersionException
 
-from .const import SUPERVISOR_VERSION, URL_HASSIO_APPARMOR
+from supervisor.jobs.decorator import Job, JobCondition
+
+from .const import ATTR_SUPERVISOR_INTERNET, SUPERVISOR_VERSION, URL_HASSIO_APPARMOR
 from .coresys import CoreSys, CoreSysAttributes
 from .docker.stats import DockerStats
 from .docker.supervisor import DockerSupervisor
@@ -17,6 +21,7 @@ from .exceptions import (
     DockerError,
     HostAppArmorError,
     SupervisorError,
+    SupervisorJobError,
     SupervisorUpdateError,
 )
 from .resolution.const import ContextType, IssueType
@@ -31,16 +36,32 @@ class Supervisor(CoreSysAttributes):
         """Initialize hass object."""
         self.coresys: CoreSys = coresys
         self.instance: DockerSupervisor = DockerSupervisor(coresys)
+        self._connectivity: bool = True
 
     async def load(self) -> None:
         """Prepare Home Assistant object."""
         try:
-            await self.instance.attach(tag="latest")
+            await self.instance.attach(version=self.version)
         except DockerError:
             _LOGGER.critical("Can't setup Supervisor Docker container!")
 
         with suppress(DockerError):
             await self.instance.cleanup()
+
+    @property
+    def connectivity(self) -> bool:
+        """Return true if we are connected to the internet."""
+        return self._connectivity
+
+    @connectivity.setter
+    def connectivity(self, state: bool) -> None:
+        """Set supervisor connectivity state."""
+        if self._connectivity == state:
+            return
+        self._connectivity = state
+        self.sys_homeassistant.websocket.supervisor_update_event(
+            "network", {ATTR_SUPERVISOR_INTERNET: state}
+        )
 
     @property
     def ip_address(self) -> IPv4Address:
@@ -50,15 +71,21 @@ class Supervisor(CoreSysAttributes):
     @property
     def need_update(self) -> bool:
         """Return True if an update is available."""
-        return self.version != self.latest_version
+        if self.sys_dev:
+            return False
+
+        try:
+            return self.version < self.latest_version
+        except (AwesomeVersionException, TypeError):
+            return False
 
     @property
-    def version(self) -> str:
+    def version(self) -> AwesomeVersion:
         """Return version of running Home Assistant."""
-        return SUPERVISOR_VERSION
+        return AwesomeVersion(SUPERVISOR_VERSION)
 
     @property
-    def latest_version(self) -> str:
+    def latest_version(self) -> AwesomeVersion:
         """Return last available version of Home Assistant."""
         return self.sys_updater.version_supervisor
 
@@ -81,6 +108,7 @@ class Supervisor(CoreSysAttributes):
                 data = await request.text()
 
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            self.sys_supervisor.connectivity = False
             _LOGGER.warning("Can't fetch AppArmor profile: %s", err)
             raise SupervisorError() from err
 
@@ -100,7 +128,7 @@ class Supervisor(CoreSysAttributes):
                 _LOGGER.error("Can't update AppArmor profile!")
                 raise SupervisorError() from err
 
-    async def update(self, version: Optional[str] = None) -> None:
+    async def update(self, version: Optional[AwesomeVersion] = None) -> None:
         """Update Home Assistant version."""
         version = version or self.latest_version
 
@@ -108,6 +136,14 @@ class Supervisor(CoreSysAttributes):
             _LOGGER.warning("Version %s is already installed", version)
             return
 
+        # First update own AppArmor
+        try:
+            await self.update_apparmor()
+        except SupervisorError as err:
+            _LOGGER.critical("Abort update because of an issue with AppArmor!")
+            raise SupervisorUpdateError() from err
+
+        # Update container
         _LOGGER.info("Update Supervisor to version %s", version)
         try:
             await self.instance.install(
@@ -121,13 +157,18 @@ class Supervisor(CoreSysAttributes):
             self.sys_resolution.create_issue(
                 IssueType.UPDATE_FAILED, ContextType.SUPERVISOR
             )
+            self.sys_capture_exception(err)
             raise SupervisorUpdateError() from err
         else:
             self.sys_config.version = version
             self.sys_config.save_data()
 
-        with suppress(SupervisorError):
-            await self.update_apparmor()
+        self.sys_create_task(self.sys_core.stop())
+
+    @Job(conditions=[JobCondition.RUNNING], on_condition=SupervisorJobError)
+    async def restart(self) -> None:
+        """Restart Supervisor soft."""
+        self.sys_core.exit_code = 100
         self.sys_create_task(self.sys_core.stop())
 
     @property
@@ -159,3 +200,15 @@ class Supervisor(CoreSysAttributes):
             await self.instance.retag()
         except DockerError:
             _LOGGER.error("Repair of Supervisor failed")
+
+    async def check_connectivity(self):
+        """Check the connection."""
+        timeout = aiohttp.ClientTimeout(total=10)
+        try:
+            await self.sys_websession.head(
+                "https://version.home-assistant.io/online.txt", timeout=timeout
+            )
+        except (ClientError, asyncio.TimeoutError):
+            self.connectivity = False
+        else:
+            self.connectivity = True

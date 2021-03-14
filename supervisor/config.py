@@ -5,6 +5,8 @@ import os
 from pathlib import Path, PurePath
 from typing import List, Optional
 
+from awesomeversion import AwesomeVersion
+
 from .const import (
     ATTR_ADDONS_CUSTOM_LIST,
     ATTR_DEBUG,
@@ -20,8 +22,8 @@ from .const import (
     SUPERVISOR_DATA,
     LogLevel,
 )
+from .utils.common import FileConfiguration
 from .utils.dt import parse_datetime
-from .utils.json import JsonConfig
 from .validate import SCHEMA_SUPERVISOR_CONFIG
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
@@ -46,7 +48,7 @@ MEDIA_DATA = PurePath("media")
 DEFAULT_BOOT_TIME = datetime.utcfromtimestamp(0).isoformat()
 
 
-class CoreConfig(JsonConfig):
+class CoreConfig(FileConfiguration):
     """Hold all core config data."""
 
     def __init__(self):
@@ -64,12 +66,12 @@ class CoreConfig(JsonConfig):
         self._data[ATTR_TIMEZONE] = value
 
     @property
-    def version(self) -> str:
+    def version(self) -> AwesomeVersion:
         """Return config version."""
         return self._data[ATTR_VERSION]
 
     @version.setter
-    def version(self, value: str) -> None:
+    def version(self, value: AwesomeVersion) -> None:
         """Set config version."""
         self._data[ATTR_VERSION] = value
 

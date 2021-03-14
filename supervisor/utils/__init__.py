@@ -1,12 +1,12 @@
 """Tools file for Supervisor."""
 import asyncio
 from contextvars import ContextVar
-from datetime import datetime
 from ipaddress import IPv4Address
 import logging
+from pathlib import Path
 import re
 import socket
-from typing import Any, Optional
+from typing import Any
 
 from .job_monitor import JobMonitor
 
@@ -39,65 +39,6 @@ def process_lock(method):
             return await method(api, *args, **kwargs)
 
     return wrap_api
-
-
-class AsyncThrottle:
-    """A class for throttling the execution of tasks.
-
-    Decorator that prevents a function from being called more than once every
-    time period with blocking.
-    """
-
-    def __init__(self, delta):
-        """Initialize async throttle."""
-        self.throttle_period = delta
-        self.time_of_last_call = datetime.min
-        self.synchronize: Optional[asyncio.Lock] = None
-
-    def __call__(self, method):
-        """Throttle function."""
-
-        async def wrapper(*args, **kwargs):
-            """Throttle function wrapper."""
-            if not self.synchronize:
-                self.synchronize = asyncio.Lock()
-
-            async with self.synchronize:
-                now = datetime.now()
-                time_since_last_call = now - self.time_of_last_call
-
-                if time_since_last_call > self.throttle_period:
-                    self.time_of_last_call = now
-                    return await method(*args, **kwargs)
-
-        return wrapper
-
-
-class AsyncCallFilter:
-    """A class for throttling the execution of tasks, with a filter.
-
-    Decorator that prevents a function from being called more than once every
-    time period.
-    """
-
-    def __init__(self, delta):
-        """Initialize async throttle."""
-        self.throttle_period = delta
-        self.time_of_last_call = datetime.min
-
-    def __call__(self, method):
-        """Throttle function."""
-
-        async def wrapper(*args, **kwargs):
-            """Throttle function wrapper."""
-            now = datetime.now()
-            time_since_last_call = now - self.time_of_last_call
-
-            if time_since_last_call > self.throttle_period:
-                self.time_of_last_call = now
-                return await method(*args, **kwargs)
-
-        return wrapper
 
 
 def check_port(address: IPv4Address, port: int) -> bool:
@@ -139,3 +80,26 @@ def get_message_from_exception_chain(err: Exception) -> str:
         return ""
 
     return get_message_from_exception_chain(err.__context__)
+
+
+async def remove_folder(folder: Path, content_only: bool = False) -> None:
+    """Remove folder and reset privileged.
+
+    Is needed to avoid issue with:
+        - CAP_DAC_OVERRIDE
+        - CAP_DAC_READ_SEARCH
+    """
+    del_folder = f"{folder}" + "/{,.[!.],..?}*" if content_only else f"{folder}"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-c", f"rm -rf {del_folder}", stdout=asyncio.subprocess.DEVNULL
+        )
+
+        _, error_msg = await proc.communicate()
+    except OSError as err:
+        error_msg = str(err)
+    else:
+        if proc.returncode == 0:
+            return
+
+    _LOGGER.error("Can't remove folder %s: %s", folder, error_msg)

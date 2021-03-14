@@ -6,6 +6,8 @@ from typing import Any, Awaitable, Dict
 from aiohttp import web
 import voluptuous as vol
 
+from supervisor.resolution.const import ContextType, SuggestionType
+
 from ..const import (
     ATTR_ADDONS,
     ATTR_ADDONS_REPOSITORIES,
@@ -20,7 +22,6 @@ from ..const import (
     ATTR_DIAGNOSTICS,
     ATTR_HEALTHY,
     ATTR_ICON,
-    ATTR_INSTALLED,
     ATTR_IP_ADDRESS,
     ATTR_LOGGING,
     ATTR_LOGO,
@@ -35,11 +36,11 @@ from ..const import (
     ATTR_STATE,
     ATTR_SUPPORTED,
     ATTR_TIMEZONE,
+    ATTR_UPDATE_AVAILABLE,
     ATTR_VERSION,
     ATTR_VERSION_LATEST,
     ATTR_WAIT_BOOT,
     CONTENT_TYPE_BINARY,
-    SUPERVISOR_VERSION,
     LogLevel,
     UpdateChannel,
 )
@@ -87,8 +88,9 @@ class APISupervisor(CoreSysAttributes):
                     ATTR_SLUG: addon.slug,
                     ATTR_DESCRIPTON: addon.description,
                     ATTR_STATE: addon.state,
-                    ATTR_VERSION: addon.latest_version,
-                    ATTR_INSTALLED: addon.version,
+                    ATTR_VERSION: addon.version,
+                    ATTR_VERSION_LATEST: addon.latest_version,
+                    ATTR_UPDATE_AVAILABLE: addon.need_update,
                     ATTR_REPOSITORY: addon.repository,
                     ATTR_ICON: addon.with_icon,
                     ATTR_LOGO: addon.with_logo,
@@ -96,8 +98,9 @@ class APISupervisor(CoreSysAttributes):
             )
 
         return {
-            ATTR_VERSION: SUPERVISOR_VERSION,
-            ATTR_VERSION_LATEST: self.sys_updater.version_supervisor,
+            ATTR_VERSION: self.sys_supervisor.version,
+            ATTR_VERSION_LATEST: self.sys_supervisor.latest_version,
+            ATTR_UPDATE_AVAILABLE: self.sys_supervisor.need_update,
             ATTR_CHANNEL: self.sys_updater.channel,
             ATTR_ARCH: self.sys_supervisor.arch,
             ATTR_SUPPORTED: self.sys_core.supported,
@@ -142,10 +145,20 @@ class APISupervisor(CoreSysAttributes):
         if ATTR_ADDONS_REPOSITORIES in body:
             new = set(body[ATTR_ADDONS_REPOSITORIES])
             await asyncio.shield(self.sys_store.update_repositories(new))
-            if sorted(body[ATTR_ADDONS_REPOSITORIES]) != sorted(
-                self.sys_config.addons_repositories
-            ):
-                raise APIError("Not a valid add-on repository")
+
+            # Fix invalid repository
+            found_invalid = False
+            for suggestion in self.sys_resolution.suggestions:
+                if (
+                    suggestion.type != SuggestionType.EXECUTE_REMOVE
+                    and suggestion.context != ContextType
+                ):
+                    continue
+                found_invalid = True
+                await self.sys_resolution.apply_suggestion(suggestion)
+
+            if found_invalid:
+                raise APIError("Invalid Add-on repository!")
 
         self.sys_updater.save_data()
         self.sys_config.save_data()
@@ -181,7 +194,11 @@ class APISupervisor(CoreSysAttributes):
         """Reload add-ons, configuration, etc."""
         return asyncio.shield(
             asyncio.wait(
-                [self.sys_updater.reload(), self.sys_homeassistant.secrets.reload()]
+                [
+                    self.sys_updater.reload(),
+                    self.sys_homeassistant.secrets.reload(),
+                    self.sys_resolution.evaluate.evaluate_system(),
+                ]
             )
         )
 
@@ -189,6 +206,11 @@ class APISupervisor(CoreSysAttributes):
     def repair(self, request: web.Request) -> Awaitable[None]:
         """Try to repair the local setup / overlayfs."""
         return asyncio.shield(self.sys_core.repair())
+
+    @api_process
+    def restart(self, request: web.Request) -> Awaitable[None]:
+        """Soft restart Supervisor."""
+        return asyncio.shield(self.sys_supervisor.restart())
 
     @api_process_raw(CONTENT_TYPE_BINARY)
     def logs(self, request: web.Request) -> Awaitable[bytes]:

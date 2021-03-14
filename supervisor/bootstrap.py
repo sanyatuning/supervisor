@@ -8,7 +8,13 @@ import signal
 from colorlog import ColoredFormatter
 import sentry_sdk
 from sentry_sdk.integrations.aiohttp import AioHttpIntegration
+from sentry_sdk.integrations.atexit import AtexitIntegration
+from sentry_sdk.integrations.dedupe import DedupeIntegration
+from sentry_sdk.integrations.excepthook import ExcepthookIntegration
 from sentry_sdk.integrations.logging import LoggingIntegration
+from sentry_sdk.integrations.threading import ThreadingIntegration
+
+from supervisor.jobs import JobManager
 
 from .addons import AddonManager
 from .api import RestAPI
@@ -16,7 +22,6 @@ from .arch import CpuArch
 from .auth import Auth
 from .const import (
     ENV_HOMEASSISTANT_REPOSITORY,
-    ENV_SUPERVISOR_DEV,
     ENV_SUPERVISOR_MACHINE,
     ENV_SUPERVISOR_NAME,
     ENV_SUPERVISOR_SHARE,
@@ -30,16 +35,16 @@ from .core import Core
 from .coresys import CoreSys
 from .dbus import DBusManager
 from .discovery import Discovery
+from .hardware.module import HardwareManager
 from .hassos import HassOS
 from .homeassistant import HomeAssistant
 from .host import HostManager
 from .ingress import Ingress
 from .misc.filter import filter_data
-from .misc.hwmon import HwMonitor
 from .misc.scheduler import Scheduler
 from .misc.tasks import Tasks
 from .plugins import PluginManager
-from .resolution import ResolutionManager
+from .resolution.module import ResolutionManager
 from .services import ServiceManager
 from .snapshots import SnapshotManager
 from .store import StoreManager
@@ -56,6 +61,7 @@ async def initialize_coresys() -> CoreSys:
 
     # Initialize core objects
     coresys.resolution = ResolutionManager(coresys)
+    coresys.jobs = JobManager(coresys)
     coresys.core = Core(coresys)
     coresys.plugins = PluginManager(coresys)
     coresys.arch = CpuArch(coresys)
@@ -67,7 +73,7 @@ async def initialize_coresys() -> CoreSys:
     coresys.addons = AddonManager(coresys)
     coresys.snapshots = SnapshotManager(coresys)
     coresys.host = HostManager(coresys)
-    coresys.hwmonitor = HwMonitor(coresys)
+    coresys.hardware = HardwareManager(coresys)
     coresys.ingress = Ingress(coresys)
     coresys.tasks = Tasks(coresys)
     coresys.services = ServiceManager(coresys)
@@ -96,7 +102,7 @@ async def initialize_coresys() -> CoreSys:
         coresys.machine = os.environ[ENV_SUPERVISOR_MACHINE]
     elif os.environ.get(ENV_HOMEASSISTANT_REPOSITORY):
         coresys.machine = os.environ[ENV_HOMEASSISTANT_REPOSITORY][14:-14]
-    _LOGGER.debug("Seting up coresys for machine: %s", coresys.machine)
+    _LOGGER.info("Seting up coresys for machine: %s", coresys.machine)
 
     return coresys
 
@@ -120,7 +126,7 @@ def initialize_system_data(coresys: CoreSys) -> None:
 
     # Supervisor addon data folder
     if not config.path_addons_data.is_dir():
-        _LOGGER.info(
+        _LOGGER.debug(
             "Creating Supervisor Add-on data folder at '%s'", config.path_addons_data
         )
         config.path_addons_data.mkdir(parents=True)
@@ -180,7 +186,7 @@ def initialize_system_data(coresys: CoreSys) -> None:
     coresys.config.modify_log_level()
 
     # Check if ENV is in development mode
-    if bool(os.environ.get(ENV_SUPERVISOR_DEV, 0)):
+    if coresys.dev:
         _LOGGER.warning("Environment variables 'SUPERVISOR_DEV' is set")
         coresys.updater.channel = UpdateChannel.DEV
         coresys.config.logging = LogLevel.DEBUG
@@ -287,21 +293,26 @@ def supervisor_debugger(coresys: CoreSys) -> None:
 
     debugpy.listen(("0.0.0.0", 33333))
     if coresys.config.debug_block:
-        _LOGGER.debug("Wait until debugger is attached")
+        _LOGGER.info("Wait until debugger is attached")
         debugpy.wait_for_client()
 
 
 def setup_diagnostics(coresys: CoreSys) -> None:
     """Sentry diagnostic backend."""
-    sentry_logging = LoggingIntegration(
-        level=logging.WARNING, event_level=logging.CRITICAL
-    )
-
     _LOGGER.info("Initializing Supervisor Sentry")
     sentry_sdk.init(
         dsn="https://9c6ea70f49234442b4746e447b24747e@o427061.ingest.sentry.io/5370612",
         before_send=lambda event, hint: filter_data(coresys, event, hint),
-        max_breadcrumbs=30,
-        integrations=[AioHttpIntegration(), sentry_logging],
+        auto_enabling_integrations=False,
+        default_integrations=False,
+        integrations=[
+            AioHttpIntegration(),
+            ExcepthookIntegration(),
+            DedupeIntegration(),
+            AtexitIntegration(),
+            ThreadingIntegration(),
+            LoggingIntegration(level=logging.WARNING, event_level=logging.CRITICAL),
+        ],
         release=SUPERVISOR_VERSION,
+        max_breadcrumbs=30,
     )

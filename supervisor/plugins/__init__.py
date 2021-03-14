@@ -2,15 +2,14 @@
 import asyncio
 import logging
 
-from packaging.version import LegacyVersion, parse as pkg_parse
-
 from ..coresys import CoreSys, CoreSysAttributes
 from ..exceptions import HassioError
-from .audio import Audio
-from .cli import HaCli
-from .dns import CoreDNS
-from .multicast import Multicast
-from .observer import Observer
+from ..resolution.const import ContextType, IssueType, SuggestionType
+from .audio import PluginAudio
+from .cli import PluginCli
+from .dns import PluginDns
+from .multicast import PluginMulticast
+from .observer import PluginObserver
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -18,44 +17,38 @@ _LOGGER: logging.Logger = logging.getLogger(__name__)
 class PluginManager(CoreSysAttributes):
     """Manage supported function for plugins."""
 
-    required_cli: LegacyVersion = pkg_parse("26")
-    required_dns: LegacyVersion = pkg_parse("9")
-    required_audio: LegacyVersion = pkg_parse("17")
-    required_observer: LegacyVersion = pkg_parse("2020.10.1")
-    required_multicast: LegacyVersion = pkg_parse("3")
-
     def __init__(self, coresys: CoreSys):
         """Initialize plugin manager."""
         self.coresys: CoreSys = coresys
 
-        self._cli: HaCli = HaCli(coresys)
-        self._dns: CoreDNS = CoreDNS(coresys)
-        self._audio: Audio = Audio(coresys)
-        self._observer: Observer = Observer(coresys)
-        self._multicast: Multicast = Multicast(coresys)
+        self._cli: PluginCli = PluginCli(coresys)
+        self._dns: PluginDns = PluginDns(coresys)
+        self._audio: PluginAudio = PluginAudio(coresys)
+        self._observer: PluginObserver = PluginObserver(coresys)
+        self._multicast: PluginMulticast = PluginMulticast(coresys)
 
     @property
-    def cli(self) -> HaCli:
+    def cli(self) -> PluginCli:
         """Return cli handler."""
         return self._cli
 
     @property
-    def dns(self) -> CoreDNS:
+    def dns(self) -> PluginDns:
         """Return dns handler."""
         return self._dns
 
     @property
-    def audio(self) -> Audio:
+    def audio(self) -> PluginAudio:
         """Return audio handler."""
         return self._audio
 
     @property
-    def observer(self) -> Observer:
+    def observer(self) -> PluginObserver:
         """Return observer handler."""
         return self._observer
 
     @property
-    def multicast(self) -> Multicast:
+    def multicast(self) -> PluginMulticast:
         """Return multicast handler."""
         return self._multicast
 
@@ -72,44 +65,49 @@ class PluginManager(CoreSysAttributes):
             try:
                 await plugin.load()
             except Exception as err:  # pylint: disable=broad-except
-                _LOGGER.warning("Can't load plugin %s: %s", type(plugin).__name__, err)
+                _LOGGER.warning("Can't load plugin %s: %s", plugin.slug, err)
+                self.sys_resolution.create_issue(
+                    IssueType.FATAL_ERROR,
+                    ContextType.PLUGIN,
+                    reference=plugin.slug,
+                    suggestions=[SuggestionType.EXECUTE_REPAIR],
+                )
                 self.sys_capture_exception(err)
 
         # Check requirements
-        for plugin, required_version in (
-            (self._audio, self.required_audio),
-            (self._dns, self.required_dns),
-            (self._cli, self.required_cli),
-            (self._observer, self.required_observer),
-            (self._multicast, self.required_multicast),
+        await self.sys_updater.reload()
+        for plugin in (
+            self.dns,
+            self.audio,
+            self.cli,
+            self.observer,
+            self.multicast,
         ):
             # Check if need an update
-            try:
-                if pkg_parse(plugin.version) >= required_version:
-                    continue
-            except TypeError:
-                _LOGGER.warning(
-                    "Unexpected issue while checking requirements for %s",
-                    type(plugin).__name__,
-                )
+            if not plugin.need_update:
+                continue
 
             _LOGGER.info(
-                "%s does not have the required version %s, updating",
-                type(plugin).__name__,
-                required_version,
+                "%s does not have the latest version %s, updating",
+                plugin.slug,
+                plugin.latest_version,
             )
             try:
-                await plugin.update(version=str(required_version))
+                await plugin.update()
             except HassioError:
                 _LOGGER.error(
-                    "Can't update %s to %s but it's a reuirement, the Supervisor is now in an unhealthy state!",
-                    type(plugin).__name__,
-                    required_version,
+                    "Can't update %s to %s, the Supervisor healthy could be compromised!",
+                    plugin.slug,
+                    plugin.latest_version,
+                )
+                self.sys_resolution.create_issue(
+                    IssueType.UPDATE_FAILED,
+                    ContextType.PLUGIN,
+                    reference=plugin.slug,
+                    suggestions=[SuggestionType.EXECUTE_UPDATE],
                 )
             except Exception as err:  # pylint: disable=broad-except
-                _LOGGER.warning(
-                    "Can't update plugin %s: %s", type(plugin).__name__, err
-                )
+                _LOGGER.warning("Can't update plugin %s: %s", plugin.slug, err)
                 self.sys_capture_exception(err)
 
     async def repair(self) -> None:
@@ -136,5 +134,5 @@ class PluginManager(CoreSysAttributes):
             try:
                 await plugin.stop()
             except Exception as err:  # pylint: disable=broad-except
-                _LOGGER.warning("Can't stop plugin %s: %s", type(plugin).__name__, err)
+                _LOGGER.warning("Can't stop plugin %s: %s", plugin.slug, err)
                 self.sys_capture_exception(err)

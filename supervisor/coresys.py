@@ -3,15 +3,15 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import os
 from typing import TYPE_CHECKING, Any, Callable, Coroutine, Optional, TypeVar
 
 import aiohttp
 import sentry_sdk
 
 from .config import CoreConfig
-from .const import UpdateChannel
+from .const import ENV_SUPERVISOR_DEV
 from .docker import DockerAPI
-from .misc.hardware import Hardware
 
 if TYPE_CHECKING:
     from .addons import AddonManager
@@ -21,20 +21,21 @@ if TYPE_CHECKING:
     from .core import Core
     from .dbus import DBusManager
     from .discovery import Discovery
+    from .hardware.module import HardwareManager
     from .hassos import HassOS
-    from .misc.scheduler import Scheduler
-    from .misc.hwmon import HwMonitor
-    from .misc.tasks import Tasks
     from .homeassistant import HomeAssistant
     from .host import HostManager
     from .ingress import Ingress
+    from .jobs import JobManager
+    from .misc.scheduler import Scheduler
+    from .misc.tasks import Tasks
+    from .plugins import PluginManager
+    from .resolution.module import ResolutionManager
     from .services import ServiceManager
     from .snapshots import SnapshotManager
-    from .supervisor import Supervisor
     from .store import StoreManager
+    from .supervisor import Supervisor
     from .updater import Updater
-    from .plugins import PluginManager
-    from .resolution import ResolutionManager
 
 
 T = TypeVar("T")
@@ -58,7 +59,6 @@ class CoreSys:
 
         # Global objects
         self._config: CoreConfig = CoreConfig()
-        self._hardware: Hardware = Hardware()
         self._docker: DockerAPI = DockerAPI()
 
         # Internal objects pointers
@@ -80,16 +80,15 @@ class CoreSys:
         self._scheduler: Optional[Scheduler] = None
         self._store: Optional[StoreManager] = None
         self._discovery: Optional[Discovery] = None
-        self._hwmonitor: Optional[HwMonitor] = None
+        self._hardware: Optional[HardwareManager] = None
         self._plugins: Optional[PluginManager] = None
         self._resolution: Optional[ResolutionManager] = None
+        self._jobs: Optional[JobManager] = None
 
     @property
     def dev(self) -> bool:
         """Return True if we run dev mode."""
-        if self._updater is None:
-            return False
-        return self._updater.channel == UpdateChannel.DEV
+        return bool(os.environ.get(ENV_SUPERVISOR_DEV, 0))
 
     @property
     def loop(self) -> asyncio.BaseEventLoop:
@@ -110,11 +109,6 @@ class CoreSys:
     def config(self) -> CoreConfig:
         """Return CoreConfig object."""
         return self._config
-
-    @property
-    def hardware(self) -> Hardware:
-        """Return Hardware object."""
-        return self._hardware
 
     @property
     def docker(self) -> DockerAPI:
@@ -360,18 +354,18 @@ class CoreSys:
         self._host = value
 
     @property
-    def hwmonitor(self) -> HwMonitor:
-        """Return HwMonitor object."""
-        if self._hwmonitor is None:
-            raise RuntimeError("HwMonitor not set!")
-        return self._hwmonitor
+    def hardware(self) -> HardwareManager:
+        """Return HardwareManager object."""
+        if self._hardware is None:
+            raise RuntimeError("HardwareManager not set!")
+        return self._hardware
 
-    @hwmonitor.setter
-    def hwmonitor(self, value: HwMonitor) -> None:
-        """Set a HwMonitor object."""
-        if self._hwmonitor:
-            raise RuntimeError("HwMonitor already set!")
-        self._hwmonitor = value
+    @hardware.setter
+    def hardware(self, value: HardwareManager) -> None:
+        """Set a HardwareManager object."""
+        if self._hardware:
+            raise RuntimeError("HardwareManager already set!")
+        self._hardware = value
 
     @property
     def ingress(self) -> Ingress:
@@ -414,6 +408,20 @@ class CoreSys:
         if self._resolution:
             raise RuntimeError("resolution manager already set!")
         self._resolution = value
+
+    @property
+    def jobs(self) -> JobManager:
+        """Return resolution manager object."""
+        if self._jobs is None:
+            raise RuntimeError("job manager not set!")
+        return self._jobs
+
+    @jobs.setter
+    def jobs(self, value: JobManager) -> None:
+        """Set a resolution manager object."""
+        if self._jobs:
+            raise RuntimeError("job manager already set!")
+        self._jobs = value
 
     @property
     def machine(self) -> Optional[str]:
@@ -474,11 +482,6 @@ class CoreSysAttributes:
     def sys_config(self) -> CoreConfig:
         """Return CoreConfig object."""
         return self.coresys.config
-
-    @property
-    def sys_hardware(self) -> Hardware:
-        """Return Hardware object."""
-        return self.coresys.hardware
 
     @property
     def sys_docker(self) -> DockerAPI:
@@ -571,9 +574,9 @@ class CoreSysAttributes:
         return self.coresys.host
 
     @property
-    def sys_hwmonitor(self) -> HwMonitor:
+    def sys_hardware(self) -> HardwareManager:
         """Return HwMonitor object."""
-        return self.coresys.hwmonitor
+        return self.coresys.hardware
 
     @property
     def sys_ingress(self) -> Ingress:
@@ -589,6 +592,11 @@ class CoreSysAttributes:
     def sys_resolution(self) -> ResolutionManager:
         """Return Resolution manager object."""
         return self.coresys.resolution
+
+    @property
+    def sys_jobs(self) -> JobManager:
+        """Return Job manager object."""
+        return self.coresys.jobs
 
     def sys_run_in_executor(
         self, funct: Callable[..., T], *args: Any

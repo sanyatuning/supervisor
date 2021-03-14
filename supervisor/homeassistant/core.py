@@ -10,7 +10,7 @@ import time
 from typing import Awaitable, Optional
 
 import attr
-from packaging import version as pkg_version
+from awesomeversion import AwesomeVersion, AwesomeVersionException
 
 from ..coresys import CoreSys, CoreSysAttributes
 from ..docker.homeassistant import DockerHomeAssistant
@@ -19,16 +19,17 @@ from ..exceptions import (
     DockerError,
     HomeAssistantCrashError,
     HomeAssistantError,
+    HomeAssistantJobError,
     HomeAssistantUpdateError,
 )
+from ..jobs.decorator import Job, JobCondition
 from ..resolution.const import ContextType, IssueType
 from ..utils import convert_to_ascii, process_lock
+from .const import LANDINGPAGE
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
 RE_YAML_ERROR = re.compile(r"homeassistant\.util\.yaml")
-
-LANDINGPAGE: str = "landingpage"
 
 
 @attr.s(frozen=True)
@@ -63,7 +64,7 @@ class HomeAssistantCore(CoreSysAttributes):
                     await self.instance.get_latest_version()
                 )
 
-            await self.instance.attach(tag=self.sys_homeassistant.version)
+            await self.instance.attach(version=self.sys_homeassistant.version)
         except DockerError:
             _LOGGER.info(
                 "No Home Assistant Docker image %s found.", self.sys_homeassistant.image
@@ -74,9 +75,30 @@ class HomeAssistantCore(CoreSysAttributes):
             self.sys_homeassistant.image = self.instance.image
             self.sys_homeassistant.save_data()
 
+        # Start landingpage
+        if self.instance.version != LANDINGPAGE:
+            return
+
+        _LOGGER.info("Starting HomeAssistant landingpage")
+        if not await self.instance.is_running():
+            with suppress(HomeAssistantError):
+                await self._start()
+
     @process_lock
     async def install_landingpage(self) -> None:
         """Install a landing page."""
+        # Try to use a preinstalled landingpage
+        try:
+            await self.instance.attach(version=LANDINGPAGE)
+        except DockerError:
+            pass
+        else:
+            _LOGGER.info("Using preinstalled landingpage")
+            self.sys_homeassistant.version = LANDINGPAGE
+            self.sys_homeassistant.image = self.instance.image
+            self.sys_homeassistant.save_data()
+            return
+
         _LOGGER.info("Setting up Home Assistant landingpage")
         while True:
             if not self.sys_updater.image_homeassistant:
@@ -97,15 +119,10 @@ class HomeAssistantCore(CoreSysAttributes):
             except Exception as err:  # pylint: disable=broad-except
                 self.sys_capture_exception(err)
             else:
-                self.sys_homeassistant.version = self.instance.version
+                self.sys_homeassistant.version = LANDINGPAGE
                 self.sys_homeassistant.image = self.sys_updater.image_homeassistant
                 self.sys_homeassistant.save_data()
                 break
-
-        # Start landingpage
-        _LOGGER.info("Starting HomeAssistant landingpage")
-        with suppress(HomeAssistantError):
-            await self._start()
 
     @process_lock
     async def install(self) -> None:
@@ -116,11 +133,11 @@ class HomeAssistantCore(CoreSysAttributes):
             if not self.sys_homeassistant.latest_version:
                 await self.sys_updater.reload()
 
-            tag = self.sys_homeassistant.latest_version
-            if tag:
+            if self.sys_homeassistant.latest_version:
                 try:
                     await self.instance.update(
-                        tag, image=self.sys_updater.image_homeassistant
+                        self.sys_homeassistant.latest_version,
+                        image=self.sys_updater.image_homeassistant,
                     )
                     break
                 except DockerError:
@@ -148,7 +165,15 @@ class HomeAssistantCore(CoreSysAttributes):
             await self.instance.cleanup()
 
     @process_lock
-    async def update(self, version: Optional[str] = None) -> None:
+    @Job(
+        conditions=[
+            JobCondition.FREE_SPACE,
+            JobCondition.HEALTHY,
+            JobCondition.INTERNET_HOST,
+        ],
+        on_condition=HomeAssistantJobError,
+    )
+    async def update(self, version: Optional[AwesomeVersion] = None) -> None:
         """Update HomeAssistant version."""
         version = version or self.sys_homeassistant.latest_version
         old_image = self.sys_homeassistant.image
@@ -161,7 +186,7 @@ class HomeAssistantCore(CoreSysAttributes):
             return
 
         # process an update
-        async def _update(to_version: str) -> None:
+        async def _update(to_version: AwesomeVersion) -> None:
             """Run Home Assistant update."""
             _LOGGER.info("Updating Home Assistant to version %s", to_version)
             try:
@@ -196,7 +221,7 @@ class HomeAssistantCore(CoreSysAttributes):
                 IssueType.UPDATE_ROLLBACK, ContextType.CORE
             )
 
-            # Make a copy of the current log file if it exsist
+            # Make a copy of the current log file if it exists
             logfile = self.sys_config.path_homeassistant / "home-assistant.log"
             if logfile.exists():
                 backup = (
@@ -334,7 +359,7 @@ class HomeAssistantCore(CoreSysAttributes):
         _LOGGER.info("Home Assistant config is valid")
         return ConfigResult(True, log)
 
-    async def _block_till_run(self, version: str) -> None:
+    async def _block_till_run(self, version: AwesomeVersion) -> None:
         """Block until Home-Assistant is booting up or startup timeout."""
         # Skip landingpage
         if version == LANDINGPAGE:
@@ -344,9 +369,9 @@ class HomeAssistantCore(CoreSysAttributes):
         # Manage timeouts
         timeout: bool = True
         start_time = time.monotonic()
-        with suppress(pkg_version.InvalidVersion):
+        with suppress(AwesomeVersionException):
             # Version provide early stage UI
-            if pkg_version.parse(version) >= pkg_version.parse("0.112.0"):
+            if version >= AwesomeVersion("0.112.0"):
                 _LOGGER.debug("Disable startup timeouts - early UI")
                 timeout = False
 
@@ -405,17 +430,18 @@ class HomeAssistantCore(CoreSysAttributes):
         self._error_state = True
         raise HomeAssistantCrashError()
 
+    @Job(
+        conditions=[
+            JobCondition.FREE_SPACE,
+            JobCondition.INTERNET_HOST,
+        ]
+    )
     async def repair(self):
         """Repair local Home Assistant data."""
         if await self.instance.exists():
             return
 
         _LOGGER.info("Repair Home Assistant %s", self.sys_homeassistant.version)
-        await self.sys_run_in_executor(
-            self.sys_docker.network.stale_cleanup, self.instance.name
-        )
-
-        # Pull image
         try:
             await self.instance.install(self.sys_homeassistant.version)
         except DockerError:

@@ -6,17 +6,22 @@ from typing import Any, Dict
 import voluptuous as vol
 from voluptuous.humanize import humanize_error
 
-from ..addons.validate import SCHEMA_ADDON_CONFIG
+from ..addons.validate import SCHEMA_ADDON_CONFIG, SCHEMA_ADDON_TRANSLATIONS
 from ..const import (
     ATTR_LOCATON,
     ATTR_REPOSITORY,
     ATTR_SLUG,
+    ATTR_TRANSLATIONS,
+    FILE_SUFFIX_CONFIGURATION,
     REPOSITORY_CORE,
     REPOSITORY_LOCAL,
 )
 from ..coresys import CoreSys, CoreSysAttributes
-from ..exceptions import JsonFileError
+from ..exceptions import ConfigurationFileError
+from ..resolution.const import ContextType, IssueType, SuggestionType
+from ..utils.common import find_one_filetype, read_json_or_yaml_file
 from ..utils.json import read_json_file
+from .const import StoreType
 from .utils import extract_hash_from_path
 from .validate import SCHEMA_REPOSITORY_CONFIG
 
@@ -32,7 +37,7 @@ class StoreData(CoreSysAttributes):
         self.repositories: Dict[str, Any] = {}
         self.addons: Dict[str, Any] = {}
 
-    def update(self):
+    def update(self) -> None:
         """Read data from add-on repository."""
         self.repositories.clear()
         self.addons.clear()
@@ -51,15 +56,24 @@ class StoreData(CoreSysAttributes):
             if repository_element.is_dir():
                 self._read_git_repository(repository_element)
 
-    def _read_git_repository(self, path):
+    def _read_git_repository(self, path: Path) -> None:
         """Process a custom repository folder."""
         slug = extract_hash_from_path(path)
 
         # exists repository json
-        repository_file = Path(path, "repository.json")
         try:
-            repository_info = SCHEMA_REPOSITORY_CONFIG(read_json_file(repository_file))
-        except JsonFileError:
+            repository_file = find_one_filetype(
+                path, "repository", FILE_SUFFIX_CONFIGURATION
+            )
+        except ConfigurationFileError:
+            _LOGGER.warning("No repository information exists at %s", path)
+            return
+
+        try:
+            repository_info = SCHEMA_REPOSITORY_CONFIG(
+                read_json_or_yaml_file(repository_file)
+            )
+        except ConfigurationFileError:
             _LOGGER.warning(
                 "Can't read repository information from %s", repository_file
             )
@@ -72,27 +86,36 @@ class StoreData(CoreSysAttributes):
         self.repositories[slug] = repository_info
         self._read_addons_folder(path, slug)
 
-    def _read_addons_folder(self, path, repository):
+    def _read_addons_folder(self, path: Path, repository: Dict) -> None:
         """Read data from add-ons folder."""
         try:
             # Generate a list without artefact, safe for corruptions
             addon_list = [
                 addon
-                for addon in path.glob("**/config.json")
+                for addon in path.glob("**/config.*")
                 if ".git" not in addon.parts
+                and ".github" not in addon.parts
+                and addon.suffix in FILE_SUFFIX_CONFIGURATION
             ]
         except OSError as err:
-            self.sys_core.healthy = False
+            suggestion = None
+            if path.stem != StoreType.LOCAL:
+                suggestion = [SuggestionType.EXECUTE_RESET]
+            self.sys_resolution.create_issue(
+                IssueType.CORRUPT_REPOSITORY,
+                ContextType.STORE,
+                reference=path.stem,
+                suggestions=suggestion,
+            )
             _LOGGER.critical(
                 "Can't process %s because of Filesystem issues: %s", repository, err
             )
-            self.sys_capture_exception(err)
             return
 
         for addon in addon_list:
             try:
-                addon_config = read_json_file(addon)
-            except JsonFileError:
+                addon_config = read_json_or_yaml_file(addon)
+            except ConfigurationFileError:
                 _LOGGER.warning("Can't read %s from repository %s", addon, repository)
                 continue
 
@@ -111,6 +134,9 @@ class StoreData(CoreSysAttributes):
             # store
             addon_config[ATTR_REPOSITORY] = repository
             addon_config[ATTR_LOCATON] = str(addon.parent)
+            addon_config[ATTR_TRANSLATIONS] = self._read_addon_translations(
+                addon.parent
+            )
             self.addons[addon_slug] = addon_config
 
     def _set_builtin_repositories(self):
@@ -118,7 +144,7 @@ class StoreData(CoreSysAttributes):
         try:
             builtin_file = Path(__file__).parent.joinpath("built-in.json")
             builtin_data = read_json_file(builtin_file)
-        except JsonFileError:
+        except ConfigurationFileError:
             _LOGGER.warning("Can't read built-in json")
             return
 
@@ -127,3 +153,31 @@ class StoreData(CoreSysAttributes):
 
         # local repository
         self.repositories[REPOSITORY_LOCAL] = builtin_data[REPOSITORY_LOCAL]
+
+    def _read_addon_translations(self, addon_path: Path) -> dict:
+        """Read translations from add-ons folder."""
+        translations_dir = addon_path / "translations"
+        translations = {}
+
+        if not translations_dir.exists():
+            return translations
+
+        translation_files = [
+            translation
+            for translation in translations_dir.glob("*")
+            if translation.suffix in FILE_SUFFIX_CONFIGURATION
+        ]
+
+        for translation in translation_files:
+            try:
+                translations[translation.stem] = SCHEMA_ADDON_TRANSLATIONS(
+                    read_json_or_yaml_file(translation)
+                )
+
+            except (ConfigurationFileError, vol.Invalid) as err:
+                _LOGGER.warning(
+                    "Can't read translations from %s - %s", translation, err
+                )
+                continue
+
+        return translations

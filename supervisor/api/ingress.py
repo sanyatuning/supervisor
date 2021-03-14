@@ -12,6 +12,7 @@ from aiohttp.web_exceptions import (
     HTTPUnauthorized,
 )
 from multidict import CIMultiDict, istr
+import voluptuous as vol
 
 from ..addons.addon import Addon
 from ..const import (
@@ -24,12 +25,13 @@ from ..const import (
     COOKIE_INGRESS,
     HEADER_TOKEN,
     HEADER_TOKEN_OLD,
-    REQUEST_FROM,
 )
 from ..coresys import CoreSysAttributes
-from .utils import api_process
+from .utils import api_process, api_validate, require_home_assistant
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
+
+VALIDATE_SESSION_DATA = vol.Schema({ATTR_SESSION: str})
 
 
 class APIIngress(CoreSysAttributes):
@@ -46,11 +48,6 @@ class APIIngress(CoreSysAttributes):
             raise HTTPServiceUnavailable()
 
         return addon
-
-    def _check_ha_access(self, request: web.Request) -> None:
-        if request[REQUEST_FROM] != self.sys_homeassistant:
-            _LOGGER.warning("Ingress is only available behind Home Assistant")
-            raise HTTPUnauthorized()
 
     def _create_url(self, addon: Addon, path: str) -> str:
         """Create URL to container."""
@@ -71,18 +68,28 @@ class APIIngress(CoreSysAttributes):
         return {ATTR_PANELS: addons}
 
     @api_process
+    @require_home_assistant
     async def create_session(self, request: web.Request) -> Dict[str, Any]:
         """Create a new session."""
-        self._check_ha_access(request)
-
         session = self.sys_ingress.create_session()
         return {ATTR_SESSION: session}
 
+    @api_process
+    @require_home_assistant
+    async def validate_session(self, request: web.Request) -> Dict[str, Any]:
+        """Validate session and extending how long it's valid for."""
+        data = await api_validate(VALIDATE_SESSION_DATA, request)
+
+        # Check Ingress Session
+        if not self.sys_ingress.validate_session(data[ATTR_SESSION]):
+            _LOGGER.warning("No valid ingress session %s", data[ATTR_SESSION])
+            raise HTTPUnauthorized()
+
+    @require_home_assistant
     async def handler(
         self, request: web.Request
     ) -> Union[web.Response, web.StreamResponse, web.WebSocketResponse]:
         """Route data to Supervisor ingress service."""
-        self._check_ha_access(request)
 
         # Check Ingress Session
         session = request.cookies.get(COOKIE_INGRESS)
