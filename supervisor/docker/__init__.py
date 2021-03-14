@@ -11,6 +11,7 @@ from awesomeversion import AwesomeVersion
 import docker
 import requests
 
+from .utils import PullProgress
 from ..const import (
     ATTR_REGISTRIES,
     DNS_SUFFIX,
@@ -309,3 +310,18 @@ class DockerAPI:
 
             with suppress(docker.errors.DockerException, requests.RequestException):
                 network.disconnect(data.get("Name", cid), force=True)
+
+    def pull_image(self, job_monitor, image, version):
+        """Pull docker image and send progress events to core."""
+        pull = PullProgress(job_monitor)
+        try:
+            pull.start()
+            pull_log = self.api.pull(image, version, stream=True, decode=True)
+            for line in pull_log:
+                pull.process_log(line)
+
+            return self.images.get(
+                f"{image}{'@' if version.startswith('sha256:') else ':'}{version}"
+            )
+        finally:
+            pull.done()

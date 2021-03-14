@@ -162,7 +162,8 @@ class DockerInterface(CoreSysAttributes):
                 # Try login if we have defined credentials
                 self._docker_login(image)
 
-            docker_image = self.sys_docker.images.pull(f"{image}:{version!s}")
+            job_monitor = self.sys_homeassistant.create_job_monitor(self.name)
+            docker_image = self.sys_docker.pull_image(job_monitor, image, version)
             if latest:
                 _LOGGER.info(
                     "Tagging image %s with version %s as latest", image, version

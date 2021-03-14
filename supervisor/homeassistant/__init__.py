@@ -9,6 +9,7 @@ from uuid import UUID
 
 from awesomeversion import AwesomeVersion, AwesomeVersionException
 
+from .job_monitor import JobMonitor
 from ..const import (
     ATTR_ACCESS_TOKEN,
     ATTR_AUDIO_INPUT,
@@ -233,6 +234,10 @@ class HomeAssistant(FileConfiguration, CoreSysAttributes):
             return self.version != self.latest_version
         except (AwesomeVersionException, TypeError):
             return False
+
+    def create_job_monitor(self, name: str) -> JobMonitor:
+        """Return a new job monitor."""
+        return JobMonitor(self.websocket, name)
 
     async def load(self) -> None:
         """Prepare Home Assistant object."""

@@ -27,4 +27,5 @@ class WSEvent(str, Enum):
     """Websocket events."""
 
     ADDON = "addon"
+    JOB_PROGRESS = "job_progress"
     SUPERVISOR_UPDATE = "supervisor_update"
